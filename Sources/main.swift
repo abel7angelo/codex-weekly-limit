@@ -114,6 +114,12 @@ func codexApplicationURL() -> URL? {
     NSWorkspace.shared.urlForApplication(withBundleIdentifier: codexBundleIdentifier)
 }
 
+func codexProcessIdentifier() -> pid_t? {
+    NSRunningApplication.runningApplications(withBundleIdentifier: codexBundleIdentifier)
+        .first(where: { !$0.isTerminated })?
+        .processIdentifier
+}
+
 enum LimitReadError: LocalizedError {
     case codexNotFound
     case failedToStart
@@ -180,7 +186,7 @@ func readLimits() throws -> [String: Any] {
             "params": [
                 "clientInfo": [
                     "name": "codex_weekly_menubar",
-                    "version": "1.1.0"
+                    "version": "1.1.1"
                 ]
             ]
         ])
@@ -230,14 +236,36 @@ func codexLimitBucket(_ result: [String: Any]) -> [String: Any] {
     return result["rateLimits"] as? [String: Any] ?? [:]
 }
 
-func limitWindow(in bucket: [String: Any], durationMinutes: Int) -> Window? {
+func limitWindowData(in bucket: [String: Any], durationMinutes: Int) -> [String: Any]? {
+    let expectedDuration = Double(durationMinutes)
     for value in bucket.values {
         guard let data = value as? [String: Any],
               let duration = numberValue(data["windowDurationMins"]),
-              Int(duration) == durationMinutes else { continue }
-        return Window(data)
+              duration == expectedDuration else { continue }
+        return data
     }
     return nil
+}
+
+func limitWindow(in bucket: [String: Any], durationMinutes: Int) -> Window? {
+    Window(limitWindowData(in: bucket, durationMinutes: durationMinutes))
+}
+
+struct ValidatedLimits {
+    let result: [String: Any]
+    let shortAvailable: Bool
+}
+
+func validatedLimits(_ result: [String: Any]) -> ValidatedLimits? {
+    let bucket = codexLimitBucket(result)
+    guard let weeklyData = limitWindowData(in: bucket, durationMinutes: 10080),
+          Window(weeklyData) != nil else { return nil }
+
+    guard let shortData = limitWindowData(in: bucket, durationMinutes: 300) else {
+        return ValidatedLimits(result: result, shortAvailable: false)
+    }
+    guard Window(shortData) != nil else { return nil }
+    return ValidatedLimits(result: result, shortAvailable: true)
 }
 
 private final class ProgressBarView: NSView {
@@ -844,10 +872,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         draw()
 
         DispatchQueue.global(qos: .utility).async {
-            let fetched: [String: Any]?
+            let fetched: ValidatedLimits?
             let message: String?
             do {
-                fetched = try readLimits()
+                let result = try readLimits()
+                guard let validated = validatedLimits(result) else {
+                    throw LimitReadError.responseUnavailable
+                }
+                fetched = validated
                 message = nil
             } catch {
                 fetched = nil
@@ -859,10 +891,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.failed = fetched == nil
                 self.errorMessage = message
                 if let fetched = fetched {
-                    self.result = fetched
+                    self.result = fetched.result
                     self.updated = Date()
-                    let fetchedBucket = codexLimitBucket(fetched)
-                    self.shortLimitAvailable = limitWindow(in: fetchedBucket, durationMinutes: 300) != nil
+                    self.shortLimitAvailable = fetched.shortAvailable
                 }
                 self.draw()
             }
@@ -878,27 +909,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func hideUntilCodexCloses() {
         let directory = suppressedIndicatorURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try? Data("hidden\n".utf8).write(to: suppressedIndicatorURL, options: .atomic)
+        let suppressedProcess = codexProcessIdentifier().map(String.init) ?? "hidden"
+        try? Data("\(suppressedProcess)\n".utf8).write(to: suppressedIndicatorURL, options: .atomic)
         NSApplication.shared.terminate(nil)
     }
 
 }
 
 if CommandLine.arguments.contains("--check") {
-    assert(Window(["usedPercent": 57.0])?.remaining == 43)
-    assert(Window(["usedPercent": 110.0])?.remaining == 0)
-    assert(Window([:]) == nil)
-    assert(MenuCopy(language: .english).weeklyLimit == "Weekly limit")
-    assert(MenuCopy(language: .portugueseBrazil).weeklyLimit == "Limite semanal")
-    assert(MenuCopy(language: .english).weeklyAbbreviation == "W")
-    assert(MenuCopy(language: .portugueseBrazil).weeklyAbbreviation == "S")
+    precondition(Window(["usedPercent": 57.0])?.remaining == 43)
+    precondition(Window(["usedPercent": 110.0])?.remaining == 0)
+    precondition(Window([:]) == nil)
+    precondition(MenuCopy(language: .english).weeklyLimit == "Weekly limit")
+    precondition(MenuCopy(language: .portugueseBrazil).weeklyLimit == "Limite semanal")
+    precondition(MenuCopy(language: .english).weeklyAbbreviation == "W")
+    precondition(MenuCopy(language: .portugueseBrazil).weeklyAbbreviation == "S")
 
     let checkBucket: [String: Any] = [
         "weekly": ["windowDurationMins": 10080.0, "usedPercent": 10.0],
         "short": ["windowDurationMins": 300.0, "usedPercent": 20.0]
     ]
-    assert(limitWindow(in: checkBucket, durationMinutes: 300)?.remaining == 80)
-    assert(limitWindow(in: checkBucket, durationMinutes: 1440) == nil)
+    precondition(limitWindow(in: checkBucket, durationMinutes: 300)?.remaining == 80)
+    precondition(limitWindow(in: checkBucket, durationMinutes: 1440) == nil)
+
+    let noShortBucket: [String: Any] = [
+        "weekly": ["windowDurationMins": 10080.0, "usedPercent": 10.0]
+    ]
+    precondition(validatedLimits(["rateLimits": noShortBucket])?.shortAvailable == false)
+
+    let malformedShortBucket: [String: Any] = [
+        "weekly": ["windowDurationMins": 10080.0, "usedPercent": 10.0],
+        "short": ["windowDurationMins": 300.0]
+    ]
+    precondition(validatedLimits(["rateLimits": malformedShortBucket]) == nil)
+
+    let oversizedDurationBucket: [String: Any] = [
+        "unexpected": ["windowDurationMins": Double.greatestFiniteMagnitude, "usedPercent": 10.0]
+    ]
+    precondition(limitWindow(in: oversizedDurationBucket, durationMinutes: 300) == nil)
 
     let result = try readLimits()
     let bucket = codexLimitBucket(result)

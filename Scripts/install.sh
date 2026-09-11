@@ -58,7 +58,7 @@ EOF
 /bin/rm -f "$support_dir/indicator.disabled"
 
 /bin/launchctl bootout "$agent_label" 2>/dev/null || true
-/usr/bin/pkill -TERM -x CodexWeeklyLimit >/dev/null 2>&1 || true
+/usr/bin/pkill -TERM -U "$(id -u)" -x CodexWeeklyLimit >/dev/null 2>&1 || true
 if ! /bin/launchctl bootstrap "$agent_domain" "$launch_agent"; then
     /bin/rm -f "$launch_agent"
     if "$had_agent"; then
