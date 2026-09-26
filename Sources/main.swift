@@ -147,7 +147,9 @@ func readLimits() throws -> [String: Any] {
     }
 
     let process = Process()
-    process.executableURL = applicationURL.appendingPathComponent("Contents/Resources/codex")
+    let currentCLI = applicationURL.appendingPathComponent("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+    let legacyCLI = applicationURL.appendingPathComponent("Contents/Resources/codex")
+    process.executableURL = FileManager.default.isExecutableFile(atPath: currentCLI.path) ? currentCLI : legacyCLI
     process.arguments = ["app-server", "--stdio"]
 
     let input = Pipe()
