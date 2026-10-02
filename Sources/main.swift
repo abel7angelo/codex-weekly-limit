@@ -148,10 +148,10 @@ enum LimitReadError: LocalizedError {
     }
 }
 
-func keychainCredentialsData() -> Data? {
+func securityOutput(_ arguments: [String]) -> Data? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-    process.arguments = ["find-generic-password", "-s", claudeKeychainService, "-w"]
+    process.arguments = arguments
     let output = Pipe()
     process.standardOutput = output
     process.standardError = FileHandle.nullDevice
@@ -167,10 +167,38 @@ func keychainCredentialsData() -> Data? {
     return data
 }
 
-func fileCredentialsData() -> Data? {
-    let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude/.credentials.json")
-    return try? Data(contentsOf: url)
+// Algumas instalações do Claude Code salvam o login com um sufixo no nome do item,
+// como "Claude Code-credentials-1a2b3c4d". A listagem não lê nenhum segredo.
+func keychainServiceNames(inDump dump: String) -> [String] {
+    let pattern = "\"svce\"<blob>=\"(\\Q\(claudeKeychainService)\\E[^\"]*)\""
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+    let range = NSRange(dump.startIndex..., in: dump)
+    var names: [String] = []
+    for match in regex.matches(in: dump, range: range) {
+        guard let nameRange = Range(match.range(at: 1), in: dump) else { continue }
+        let name = String(dump[nameRange])
+        if !names.contains(name) { names.append(name) }
+    }
+    return names
+}
+
+func keychainCredentialsData() -> [Data] {
+    if let data = securityOutput(["find-generic-password", "-s", claudeKeychainService, "-w"]) {
+        return [data]
+    }
+    guard let dump = securityOutput(["dump-keychain"]).flatMap({ String(data: $0, encoding: .utf8) }) else {
+        return []
+    }
+    return keychainServiceNames(inDump: dump)
+        .compactMap { securityOutput(["find-generic-password", "-s", $0, "-w"]) }
+}
+
+func fileCredentialsData() -> [Data] {
+    var directories = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")]
+    if let configured = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"], !configured.isEmpty {
+        directories.insert(URL(fileURLWithPath: (configured as NSString).expandingTildeInPath), at: 0)
+    }
+    return directories.compactMap { try? Data(contentsOf: $0.appendingPathComponent(".credentials.json")) }
 }
 
 struct ClaudeCredentials {
@@ -190,7 +218,7 @@ struct ClaudeCredentials {
 }
 
 func readCredentials() throws -> ClaudeCredentials {
-    for data in [keychainCredentialsData(), fileCredentialsData()].compactMap({ $0 }) {
+    for data in keychainCredentialsData() + fileCredentialsData() {
         if let credentials = ClaudeCredentials(data) { return credentials }
     }
     throw LimitReadError.credentialsNotFound
@@ -999,7 +1027,20 @@ if CommandLine.arguments.contains("--check") {
     precondition(ClaudeCredentials(tokenJSON)?.expiresAt == Date(timeIntervalSince1970: 1762232399))
     precondition(ClaudeCredentials(Data("{}".utf8)) == nil)
 
-    let result = try readLimits()
+    let dumpSample = """
+        attributes:
+            "svce"<blob>="Claude Code-credentials-1a2b3c4d"
+            "svce"<blob>="Outro serviço"
+        """
+    precondition(keychainServiceNames(inDump: dumpSample) == ["Claude Code-credentials-1a2b3c4d"])
+
+    let result: [String: Any]
+    do {
+        result = try readLimits()
+    } catch {
+        print("\(menuCopy.warningPrefix): \((error as? LocalizedError)?.errorDescription ?? menuCopy.queryFailed)")
+        exit(1)
+    }
     let bucket = limitBucket(result)
     guard let weekly = limitWindow(in: bucket, durationMinutes: 10080) else {
         fatalError("\(menuCopy.weeklyLimit) \(menuCopy.unavailable)")
