@@ -18,10 +18,13 @@ struct Window {
     }
 }
 
-let codexBundleIdentifier = "com.openai.codex"
-let preferenceShowShort = "CodexWeeklyLimit.showShortInStatus"
-let preferenceCompact = "CodexWeeklyLimit.compactStatus"
-let preferenceRotate = "CodexWeeklyLimit.rotateStatus"
+let appVersion = "2.0.0"
+let claudeBundleIdentifier = "com.anthropic.claudefordesktop"
+let claudeKeychainService = "Claude Code-credentials"
+let claudeUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+let preferenceShowShort = "ClaudeUsageLimit.showShortInStatus"
+let preferenceCompact = "ClaudeUsageLimit.compactStatus"
+let preferenceRotate = "ClaudeUsageLimit.rotateStatus"
 let menuWidth: CGFloat = 280
 
 enum InterfaceLanguage: Equatable {
@@ -58,8 +61,8 @@ struct MenuCopy {
     var automatic: String { language == .portugueseBrazil ? "Atualização automática a cada 5 min" : "Automatic update every 5 min" }
     var refresh: String { language == .portugueseBrazil ? "Atualizar agora" : "Refresh now" }
     var refreshing: String { language == .portugueseBrazil ? "Atualizando…" : "Refreshing…" }
-    var openCodex: String { language == .portugueseBrazil ? "Abrir Codex / ChatGPT" : "Open Codex / ChatGPT" }
-    var hideUntilCodexCloses: String { language == .portugueseBrazil ? "Ocultar até fechar o Codex" : "Hide until Codex closes" }
+    var openClaude: String { language == .portugueseBrazil ? "Abrir Claude" : "Open Claude" }
+    var hideUntilClaudeCloses: String { language == .portugueseBrazil ? "Ocultar até fechar o Claude" : "Hide until Claude closes" }
     var updatedPrefix: String { language == .portugueseBrazil ? "Atualizado em" : "Updated on" }
     var warningPrefix: String { language == .portugueseBrazil ? "Aviso" : "Warning" }
     var weeklyAbbreviation: String { language == .portugueseBrazil ? "S" : "W" }
@@ -87,18 +90,18 @@ struct MenuCopy {
     func statusTooltip(weekly: String, short: String, shortIncluded: Bool) -> String {
         guard shortIncluded else {
             return language == .portugueseBrazil
-                ? "Codex: semanal \(weekly) · janela de 5 horas não incluída neste plano"
-                : "Codex: weekly \(weekly) · 5-hour window not included in this plan"
+                ? "Claude: semanal \(weekly) · janela de 5 horas não incluída neste plano"
+                : "Claude: weekly \(weekly) · 5-hour window not included in this plan"
         }
         return language == .portugueseBrazil
-            ? "Codex: semanal \(weekly) · janela de 5 horas \(short)"
-            : "Codex: weekly \(weekly) · 5-hour window \(short)"
+            ? "Claude: semanal \(weekly) · janela de 5 horas \(short)"
+            : "Claude: weekly \(weekly) · 5-hour window \(short)"
     }
 
-    var codexNotFound: String { language == .portugueseBrazil ? "Codex não foi encontrado neste Mac" : "Codex was not found on this Mac" }
-    var failedToStart: String { language == .portugueseBrazil ? "Não foi possível iniciar a consulta local do Codex" : "Could not start the local Codex query" }
-    var initializationFailed: String { language == .portugueseBrazil ? "O Codex não aceitou a consulta de limites" : "Codex did not accept the limits query" }
-    var responseUnavailable: String { language == .portugueseBrazil ? "O Codex não retornou os limites" : "Codex did not return the limits" }
+    var credentialsNotFound: String { language == .portugueseBrazil ? "Login do Claude Code não encontrado neste Mac" : "Claude Code login was not found on this Mac" }
+    var sessionExpired: String { language == .portugueseBrazil ? "Sessão expirada; abra o Claude Code para renovar" : "Session expired; open Claude Code to renew it" }
+    var requestFailed: String { language == .portugueseBrazil ? "Não foi possível conectar ao Claude" : "Could not connect to Claude" }
+    var responseUnavailable: String { language == .portugueseBrazil ? "O Claude não retornou os limites" : "Claude did not return the limits" }
     var queryFailed: String { language == .portugueseBrazil ? "Não foi possível consultar os limites" : "Could not query limits" }
 }
 
@@ -110,132 +113,159 @@ func numberValue(_ value: Any?) -> Double? {
     return value.isFinite ? value : nil
 }
 
-func codexApplicationURL() -> URL? {
-    NSWorkspace.shared.urlForApplication(withBundleIdentifier: codexBundleIdentifier)
+func claudeApplicationURL() -> URL? {
+    NSWorkspace.shared.urlForApplication(withBundleIdentifier: claudeBundleIdentifier)
 }
 
-func codexProcessIdentifier() -> pid_t? {
-    NSRunningApplication.runningApplications(withBundleIdentifier: codexBundleIdentifier)
-        .first(where: { !$0.isTerminated })?
-        .processIdentifier
+// O supervisor informa qual processo do Claude (app ou Claude Code) está sendo acompanhado.
+func claudeHostProcessIdentifier() -> String? {
+    if let hostPID = ProcessInfo.processInfo.environment["CLAUDE_LIMIT_HOST_PID"], !hostPID.isEmpty {
+        return hostPID
+    }
+    return NSRunningApplication.runningApplications(withBundleIdentifier: claudeBundleIdentifier)
+        .first(where: { !$0.isTerminated })
+        .map { String($0.processIdentifier) }
 }
 
 enum LimitReadError: LocalizedError {
-    case codexNotFound
-    case failedToStart
-    case initializationFailed
+    case credentialsNotFound
+    case sessionExpired
+    case requestFailed
     case responseUnavailable
 
     var errorDescription: String? {
         let copy = menuCopy
         switch self {
-        case .codexNotFound:
-            return copy.codexNotFound
-        case .failedToStart:
-            return copy.failedToStart
-        case .initializationFailed:
-            return copy.initializationFailed
+        case .credentialsNotFound:
+            return copy.credentialsNotFound
+        case .sessionExpired:
+            return copy.sessionExpired
+        case .requestFailed:
+            return copy.requestFailed
         case .responseUnavailable:
             return copy.responseUnavailable
         }
     }
 }
 
-func readLimits() throws -> [String: Any] {
-    guard let applicationURL = codexApplicationURL() else {
-        throw LimitReadError.codexNotFound
-    }
-
+func keychainCredentialsData() -> Data? {
     let process = Process()
-    let currentCLI = applicationURL.appendingPathComponent("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
-    let legacyCLI = applicationURL.appendingPathComponent("Contents/Resources/codex")
-    process.executableURL = FileManager.default.isExecutableFile(atPath: currentCLI.path) ? currentCLI : legacyCLI
-    process.arguments = ["app-server", "--stdio"]
-
-    let input = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    process.arguments = ["find-generic-password", "-s", claudeKeychainService, "-w"]
     let output = Pipe()
-    process.standardInput = input
     process.standardOutput = output
     process.standardError = FileHandle.nullDevice
 
     do {
         try process.run()
     } catch {
-        throw LimitReadError.failedToStart
+        return nil
     }
-
-    let timeout = DispatchWorkItem {
-        if process.isRunning { process.terminate() }
-    }
-    DispatchQueue.global().asyncAfter(deadline: .now() + 25, execute: timeout)
-
-    defer {
-        timeout.cancel()
-        try? input.fileHandleForWriting.close()
-        if process.isRunning { process.terminate() }
-    }
-
-    func send(_ message: [String: Any]) throws {
-        var data = try JSONSerialization.data(withJSONObject: message)
-        data.append(10)
-        try input.fileHandleForWriting.write(contentsOf: data)
-    }
-
-    do {
-        try send([
-            "id": 1,
-            "method": "initialize",
-            "params": [
-                "clientInfo": [
-                    "name": "codex_weekly_menubar",
-                    "version": "1.1.1"
-                ]
-            ]
-        ])
-    } catch {
-        throw LimitReadError.failedToStart
-    }
-
-    var buffer = Data()
-    while true {
-        let chunk = output.fileHandleForReading.availableData
-        if chunk.isEmpty { break }
-        buffer.append(chunk)
-
-        while let end = buffer.firstIndex(of: 10) {
-            let line = buffer.subdata(in: 0..<end)
-            buffer.removeSubrange(0...end)
-            guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
-
-            if object["id"] as? Int == 1 {
-                guard object["error"] == nil else { throw LimitReadError.initializationFailed }
-                do {
-                    try send(["method": "initialized"])
-                    try send(["id": 2, "method": "account/rateLimits/read"])
-                } catch {
-                    throw LimitReadError.failedToStart
-                }
-            }
-
-            if object["id"] as? Int == 2 {
-                guard object["error"] == nil,
-                      let result = object["result"] as? [String: Any] else {
-                    throw LimitReadError.responseUnavailable
-                }
-                return result
-            }
-        }
-    }
-
-    throw LimitReadError.responseUnavailable
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0, !data.isEmpty else { return nil }
+    return data
 }
 
-func codexLimitBucket(_ result: [String: Any]) -> [String: Any] {
-    if let buckets = result["rateLimitsByLimitId"] as? [String: Any],
-       let codex = buckets["codex"] as? [String: Any] {
-        return codex
+func fileCredentialsData() -> Data? {
+    let url = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/.credentials.json")
+    return try? Data(contentsOf: url)
+}
+
+struct ClaudeCredentials {
+    let accessToken: String
+    let expiresAt: Date?
+
+    init?(_ data: Data) {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = object["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String,
+              !token.isEmpty else { return nil }
+
+        accessToken = token
+        // expiresAt vem em milissegundos desde 1970.
+        expiresAt = numberValue(oauth["expiresAt"]).map { Date(timeIntervalSince1970: $0 / 1000) }
     }
-    return result["rateLimits"] as? [String: Any] ?? [:]
+}
+
+func readCredentials() throws -> ClaudeCredentials {
+    for data in [keychainCredentialsData(), fileCredentialsData()].compactMap({ $0 }) {
+        if let credentials = ClaudeCredentials(data) { return credentials }
+    }
+    throw LimitReadError.credentialsNotFound
+}
+
+func parseResetDate(_ value: Any?) -> Date? {
+    guard let text = value as? String else { return nil }
+    let withFraction = ISO8601DateFormatter()
+    withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = withFraction.date(from: text) { return date }
+
+    let withoutFraction = ISO8601DateFormatter()
+    withoutFraction.formatOptions = [.withInternetDateTime]
+    let trimmed = text.replacingOccurrences(of: "\\.\\d+", with: "", options: .regularExpression)
+    return withoutFraction.date(from: trimmed)
+}
+
+// Converte a resposta do Claude para o formato de janelas usado pelo restante do app.
+func normalizedLimits(_ response: [String: Any]) -> [String: Any] {
+    var bucket: [String: Any] = [:]
+    for (key, minutes) in [("seven_day", 10080.0), ("five_hour", 300.0)] {
+        guard let data = response[key] as? [String: Any] else { continue }
+        var window: [String: Any] = ["windowDurationMins": minutes]
+        if let utilization = numberValue(data["utilization"]) {
+            window["usedPercent"] = utilization
+        }
+        if let reset = parseResetDate(data["resets_at"]) {
+            window["resetsAt"] = reset.timeIntervalSince1970
+        }
+        bucket[key] = window
+    }
+    return ["rateLimits": bucket]
+}
+
+private final class HTTPResultBox: @unchecked Sendable {
+    var data: Data?
+    var statusCode = 0
+    var failed = false
+}
+
+func readLimits() throws -> [String: Any] {
+    let credentials = try readCredentials()
+    if let expiresAt = credentials.expiresAt, expiresAt <= Date() {
+        throw LimitReadError.sessionExpired
+    }
+
+    var request = URLRequest(url: claudeUsageURL, timeoutInterval: 25)
+    request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+    request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("claude-usage-menubar/\(appVersion)", forHTTPHeaderField: "User-Agent")
+
+    let semaphore = DispatchSemaphore(value: 0)
+    let box = HTTPResultBox()
+    let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        box.data = data
+        box.statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        box.failed = error != nil
+        semaphore.signal()
+    }
+    task.resume()
+    semaphore.wait()
+
+    if box.statusCode == 401 || box.statusCode == 403 { throw LimitReadError.sessionExpired }
+    guard !box.failed, box.statusCode == 200, let data = box.data else {
+        throw LimitReadError.requestFailed
+    }
+    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw LimitReadError.responseUnavailable
+    }
+    return normalizedLimits(object)
+}
+
+func limitBucket(_ result: [String: Any]) -> [String: Any] {
+    result["rateLimits"] as? [String: Any] ?? [:]
 }
 
 func limitWindowData(in bucket: [String: Any], durationMinutes: Int) -> [String: Any]? {
@@ -259,7 +289,7 @@ struct ValidatedLimits {
 }
 
 func validatedLimits(_ result: [String: Any]) -> ValidatedLimits? {
-    let bucket = codexLimitBucket(result)
+    let bucket = limitBucket(result)
     guard let weeklyData = limitWindowData(in: bucket, durationMinutes: 10080),
           Window(weeklyData) != nil else { return nil }
 
@@ -614,8 +644,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let errorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let automaticItem = NSMenuItem(title: menuCopy.automatic, action: nil, keyEquivalent: "")
     private let refreshItem = NSMenuItem(title: menuCopy.refresh, action: #selector(refresh), keyEquivalent: "")
-    private let openItem = NSMenuItem(title: menuCopy.openCodex, action: #selector(openCodex), keyEquivalent: "")
-    private let hideItem = NSMenuItem(title: menuCopy.hideUntilCodexCloses, action: #selector(hideUntilCodexCloses), keyEquivalent: "")
+    private let openItem = NSMenuItem(title: menuCopy.openClaude, action: #selector(openClaude), keyEquivalent: "")
+    private let hideItem = NSMenuItem(title: menuCopy.hideUntilClaudeCloses, action: #selector(hideUntilClaudeCloses), keyEquivalent: "")
 
     private var weeklyCard: LimitCardView!
     private var shortCard: LimitCardView!
@@ -648,7 +678,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var suppressedIndicatorURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/CodexWeeklyLimit/indicator.disabled")
+            .appendingPathComponent("Library/Application Support/ClaudeUsageLimit/indicator.disabled")
     }
 
     private func displayedShort(using short: Window?) -> Bool {
@@ -748,7 +778,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(errorItem)
         menu.addItem(automaticItem)
         menu.addItem(refreshItem)
-        menu.addItem(openItem)
+        if claudeApplicationURL() != nil {
+            menu.addItem(openItem)
+        }
         menu.addItem(.separator())
         menu.addItem(hideItem)
 
@@ -770,7 +802,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func draw() {
-        let bucket = codexLimitBucket(result)
+        let bucket = limitBucket(result)
         let weekly = limitWindow(in: bucket, durationMinutes: 10080)
         let short = limitWindow(in: bucket, durationMinutes: 300)
         let displayingShort = displayedShort(using: short)
@@ -784,7 +816,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let selectedLabel = displayingShort ? "5h \(shortLabel)" : weeklyLabel
         let statusLabel = compactStatus
             ? (displayingShort ? "5h \(shortLabel)" : "\(menuCopy.weeklyAbbreviation) \(weeklyLabel)")
-            : "Codex \(selectedLabel)"
+            : "Claude \(selectedLabel)"
 
         status.button?.title = " \(statusLabel)\(displayedStale ? " !" : "")"
         status.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
@@ -902,16 +934,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func openCodex() {
-        if let applicationURL = codexApplicationURL() {
+    @objc private func openClaude() {
+        if let applicationURL = claudeApplicationURL() {
             NSWorkspace.shared.open(applicationURL)
         }
     }
 
-    @objc private func hideUntilCodexCloses() {
+    @objc private func hideUntilClaudeCloses() {
         let directory = suppressedIndicatorURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let suppressedProcess = codexProcessIdentifier().map(String.init) ?? "hidden"
+        let suppressedProcess = claudeHostProcessIdentifier() ?? "hidden"
         try? Data("\(suppressedProcess)\n".utf8).write(to: suppressedIndicatorURL, options: .atomic)
         NSApplication.shared.terminate(nil)
     }
@@ -950,8 +982,25 @@ if CommandLine.arguments.contains("--check") {
     ]
     precondition(limitWindow(in: oversizedDurationBucket, durationMinutes: 300) == nil)
 
+    let sampleResponse: [String: Any] = [
+        "five_hour": ["utilization": 6.0, "resets_at": "2025-11-04T04:59:59.943648+00:00"],
+        "seven_day": ["utilization": 35.0, "resets_at": "2025-11-06T03:59:59Z"],
+        "seven_day_opus": ["utilization": 0.0, "resets_at": NSNull()]
+    ]
+    let sampleBucket = limitBucket(normalizedLimits(sampleResponse))
+    precondition(limitWindow(in: sampleBucket, durationMinutes: 10080)?.remaining == 65)
+    precondition(limitWindow(in: sampleBucket, durationMinutes: 300)?.remaining == 94)
+    precondition(limitWindow(in: sampleBucket, durationMinutes: 300)?.reset.map { abs($0.timeIntervalSince1970 - 1762232399) < 1 } == true)
+    precondition(validatedLimits(normalizedLimits(["seven_day": ["utilization": 1.0]]))?.shortAvailable == false)
+    precondition(validatedLimits(normalizedLimits([:])) == nil)
+
+    let tokenJSON = Data(#"{"claudeAiOauth":{"accessToken":"abc","expiresAt":1762232399000}}"#.utf8)
+    precondition(ClaudeCredentials(tokenJSON)?.accessToken == "abc")
+    precondition(ClaudeCredentials(tokenJSON)?.expiresAt == Date(timeIntervalSince1970: 1762232399))
+    precondition(ClaudeCredentials(Data("{}".utf8)) == nil)
+
     let result = try readLimits()
-    let bucket = codexLimitBucket(result)
+    let bucket = limitBucket(result)
     guard let weekly = limitWindow(in: bucket, durationMinutes: 10080) else {
         fatalError("\(menuCopy.weeklyLimit) \(menuCopy.unavailable)")
     }

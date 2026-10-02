@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>CodexWeeklyLimit</string>
+    <string>ClaudeUsageLimit</string>
     <key>CFBundleIdentifier</key>
-    <string>local.codex.weekly-limit</string>
+    <string>local.claude.usage-limit</string>
     <key>CFBundleName</key>
-    <string>Codex Limite</string>
+    <string>Claude Limite</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>6</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.1</string>
+    <string>2.0.0</string>
     <key>LSUIElement</key>
     <true/>
 </dict>

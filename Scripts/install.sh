@@ -2,13 +2,13 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "$0")/.." && pwd)"
-app="$HOME/Applications/Codex Limite.app"
-support_dir="$HOME/Library/Application Support/CodexWeeklyLimit"
-launch_agent="$HOME/Library/LaunchAgents/local.codex.weekly-limit.plist"
+app="$HOME/Applications/Claude Limite.app"
+support_dir="$HOME/Library/Application Support/ClaudeUsageLimit"
+launch_agent="$HOME/Library/LaunchAgents/local.claude.usage-limit.plist"
 agent_domain="gui/$(id -u)"
-agent_label="$agent_domain/local.codex.weekly-limit"
-agent_tmp="$(mktemp /tmp/codex-weekly-limit-agent.XXXXXX)"
-agent_backup="$(mktemp /tmp/codex-weekly-limit-agent-backup.XXXXXX)"
+agent_label="$agent_domain/local.claude.usage-limit"
+agent_tmp="$(mktemp /tmp/claude-usage-limit-agent.XXXXXX)"
+agent_backup="$(mktemp /tmp/claude-usage-limit-agent-backup.XXXXXX)"
 had_agent=false
 
 cleanup() {
@@ -23,8 +23,8 @@ fi
 
 mkdir -p "$HOME/Applications" "$support_dir" "$HOME/Library/LaunchAgents"
 "$root_dir/Scripts/build-app.sh" "$app"
-cp "$root_dir/Scripts/watch-codex.sh" "$support_dir/watch-codex.sh"
-chmod 755 "$support_dir/watch-codex.sh"
+cp "$root_dir/Scripts/watch-claude.sh" "$support_dir/watch-claude.sh"
+chmod 755 "$support_dir/watch-claude.sh"
 
 if [[ -f "$launch_agent" ]]; then
     cp "$launch_agent" "$agent_backup"
@@ -37,11 +37,11 @@ cat > "$agent_tmp" <<EOF
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>local.codex.weekly-limit</string>
+    <string>local.claude.usage-limit</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/zsh</string>
-        <string>$support_dir/watch-codex.sh</string>
+        <string>$support_dir/watch-claude.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -58,7 +58,7 @@ EOF
 /bin/rm -f "$support_dir/indicator.disabled"
 
 /bin/launchctl bootout "$agent_label" 2>/dev/null || true
-/usr/bin/pkill -TERM -U "$(id -u)" -x CodexWeeklyLimit >/dev/null 2>&1 || true
+/usr/bin/pkill -TERM -U "$(id -u)" -x ClaudeUsageLimit >/dev/null 2>&1 || true
 if ! /bin/launchctl bootstrap "$agent_domain" "$launch_agent"; then
     /bin/rm -f "$launch_agent"
     if "$had_agent"; then
@@ -69,4 +69,4 @@ if ! /bin/launchctl bootstrap "$agent_domain" "$launch_agent"; then
     exit 1
 fi
 
-print "Instalação concluída. O indicador acompanha o Codex nesta conta do macOS."
+print "Instalação concluída. O indicador acompanha o Claude nesta conta do macOS."
